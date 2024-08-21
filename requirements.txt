@@ -1,0 +1,3 @@
+Bio==1.7.1
+biopython==1.83
+dict_trie==1.0.1
