@@ -4,7 +4,7 @@ from dict_trie import Trie
 from functools import partial
 import logging
 import multiprocessing as mp
-import tqdm
+from tqdm import tqdm
 
 
 FORMAT = "%(message)s"
@@ -16,7 +16,6 @@ sh = logging.StreamHandler()
 sh.setLevel(logging.INFO)
 sh.setFormatter(formatter)
 logger.addHandler(sh)
-
 
 class SingleEndDemux():
     def __init__(self,
@@ -77,13 +76,10 @@ class SingleEndDemux():
             return match_sample_id
         return None
 
-    def _get_chunk_match_dict(chunk, barcode_len, trie, allow_dist, query_id_list):
+    def _get_chunk_match_dict(chunk, trie, allow_dist, query_id_list):
         match_dict = {}
         undetermined = []
-        for record in chunk:
-            seq_id = record.id
-            seq = str(record.seq)[: barcode_len]
-
+        for seq_id, seq in chunk:
             match_sample_id = SingleEndDemux._approximate_match(
                 seq,
                 trie,
@@ -101,20 +97,23 @@ class SingleEndDemux():
         return match_dict, undetermined
 
     def _get_match_dict(self, fastq_gz):
+        records = []
         with gzip.open(fastq_gz, 'rt') as in_handle:
-            records = list(SeqIO.parse(in_handle, "fastq"))
+            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc="Reading raw data..."):
+                seq_id = record.id
+                seq = str(record.seq)[: self.barcode_len]
+                records.append((seq_id, seq))
 
         chunk_size = len(records) // self.threads + 1
         chunks = [records[i:i+chunk_size] for i in range(0, len(records), chunk_size)]
         with mp.Pool() as pool:
             func = partial(
                 SingleEndDemux._get_chunk_match_dict,
-                barcode_len = self.barcode_len,
                 trie = self.trie,
                 allow_dist = self.allow_dist,
                 query_id_list = self.sample_id_list,
             )
-            results = list(tqdm.tqdm(pool.map(func, chunks), total=len(chunks), desc="Matching Index"))
+            results = list(tqdm(pool.map(func, chunks), total=len(chunks), desc="Matching Index..."))
 
         for match_dict, undetermined in results:
             for sample_id, seq_ids in match_dict.items():
@@ -148,10 +147,10 @@ class SingleEndDemux():
                 save_dir = self.save_dir,
                 suffix = self.suffix,
             )
-            tqdm.tqdm(pool.map(func, chunks), total=len(chunks), desc="Writing Matches FASTQ")
+            tqdm(pool.map(func, chunks), total=len(chunks), desc="Writing Matches FASTQ...")
 
     def _write_undetermined_fastq(self, raw):
-        logger.info("Writing Undetermined FASTQ")
+        logger.info("Writing Undetermined FASTQ...")
         SingleEndDemux._write_fastq(raw, self.undetermined, f"{self.save_dir}/undetermined.fastq.gz")
 
     def _report_match_rate(self):
@@ -253,7 +252,6 @@ class PairedEndDemux():
 
     def _get_chunk_match_dict(
             chunk,
-            barcode_len,
             for_trie,
             rev_trie,
             allow_dist,
@@ -267,10 +265,7 @@ class PairedEndDemux():
             "RF": {}, 
         }
         undetermined_dict = {"F": [], "R": []}
-        for record in chunk:
-            seq_id = record.id
-            seq = str(record.seq)[: barcode_len]
-
+        for seq_id, seq in chunk:
             match_sample_id, index_direct = PairedEndDemux._approximate_match(
                 seq,
                 for_trie,
@@ -289,8 +284,12 @@ class PairedEndDemux():
         return match_dict, undetermined_dict
 
     def _get_match_dict(self, fastq_gz, read_direct):
+        records = []
         with gzip.open(fastq_gz, 'rt') as in_handle:
-            records = list(SeqIO.parse(in_handle, "fastq"))
+            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc="Reading raw data..."):
+                seq_id = record.id
+                seq = str(record.seq)[: self.barcode_len]
+                records.append((seq_id, seq))
 
         chunk_size = len(records) // self.threads + 1
         chunks = [records[i:i+chunk_size] for i in range(0, len(records), chunk_size)]
@@ -298,14 +297,13 @@ class PairedEndDemux():
         with mp.Pool() as pool:
             func = partial(
                 PairedEndDemux._get_chunk_match_dict,
-                barcode_len = self.barcode_len,
                 for_trie = self.for_trie,
                 rev_trie = self.rev_trie,
                 allow_dist = self.allow_dist,
                 query_id_list = self.sample_id_list,
                 read_direct = read_direct,
             )
-            results = list(tqdm.tqdm(pool.map(func, chunks), total=len(chunks), desc="Matching Index"))
+            results = list(tqdm(pool.map(func, chunks), total=len(chunks), desc="Matching Index..."))
 
         for match_dict, undetermined_dict in results:
             for direct, match in match_dict.items():
@@ -372,15 +370,15 @@ class PairedEndDemux():
                 rev_raw = rev_raw,
                 save_dir = self.save_dir
             )
-            tqdm.tqdm(pool.map(func, chunks), total=len(chunks), desc="Writing Matches FASTQ")
+            tqdm(pool.map(func, chunks), total=len(chunks), desc="Writing Matches FASTQ...")
 
     def _write_unmatch_fastq(self, for_raw, rev_raw):
-        logger.info("Writing Unmatched FASTQ")
+        logger.info("Writing Unmatched FASTQ...")
         PairedEndDemux._write_fastq(for_raw, self.unmatch_dict["F"], f"{self.save_dir}/unmatched_R1.fastq.gz")
         PairedEndDemux._write_fastq(rev_raw, self.unmatch_dict["R"], f"{self.save_dir}/unmatched_R2.fastq.gz")
 
     def _write_undetermined_fastq(self, for_raw, rev_raw):
-        logger.info("Writing Undetermined FASTQ")
+        logger.info("Writing Undetermined FASTQ...")
         PairedEndDemux._write_fastq(for_raw, self.undetermined_dict["F"], f"{self.save_dir}/undetermined_R1.fastq.gz")
         PairedEndDemux._write_fastq(rev_raw, self.undetermined_dict["R"], f"{self.save_dir}/undetermined_R2.fastq.gz")
 
