@@ -9,11 +9,11 @@ git clone https://github.com/ComputationalAgronomy/demultiplex.git
 ## Installation
 1. Required Python Package Installation
 ```sh
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 2. Local package installs
 ```sh
-python -m pip install -e .
+pip install -e .
 ```
 
 ## Usage

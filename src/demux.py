@@ -5,22 +5,15 @@ import logging
 import os
 
 
-def add_logger(log_path):
-    FORMAT = "%(message)s"
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter(FORMAT)
+FORMAT = "%(message)s"
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter(FORMAT)
 
-    sh = logging.StreamHandler()
-    sh.setLevel(logging.INFO)
-    sh.setFormatter(formatter)
-    logger.addHandler(sh)
-
-    fh = logging.FileHandler(log_path)
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-    return logger
+sh = logging.StreamHandler()
+sh.setLevel(logging.INFO)
+sh.setFormatter(formatter)
+logger.addHandler(sh)
 
 
 class SingleEndDemux():
@@ -45,9 +38,7 @@ class SingleEndDemux():
         self.save_dir = save_dir
         self.allow_dist = allow_mismatch
         self.match_dict = {}
-        self.unmatches = []
-        self.match_num = 0
-        self.unmatch_num = 0
+        self.undetermined = []
         self._read_barcode(index_path)
         self._init_dict()
         self.trie = Trie(self.barcode)
@@ -81,10 +72,8 @@ class SingleEndDemux():
         match_sample_id = self._approximate_match()
         if match_sample_id:
             self.match_dict[match_sample_id].append(seq_id)
-            self.match_num += 1
         else:
-            self.unmatches.append(seq_id)
-            self.unmatch_num += 1
+            self.undetermined.append(seq_id)
 
     def _get_match_dict(self, fastq_gz):
         with gzip.open(fastq_gz, 'rt') as in_handle:
@@ -105,12 +94,22 @@ class SingleEndDemux():
             save_path = f"{self.save_dir}/{sample_id}_{suffix}.fastq.gz"
             self._write_fastq(raw, seq_id_list, save_path)
 
-    def _write_unmatch_fastq(self, raw):
-        self._write_fastq(raw, self.unmatches, f"{self.save_dir}/unmatches.fastq.gz")
+    def _write_undetermined_fastq(self, raw):
+        self._write_fastq(raw, self.undetermined, f"{self.save_dir}/undetermined.fastq.gz")
 
     def _report_match_rate(self):
-        logger = add_logger(os.path.join(self.save_dir, "match_rate.log"))
-        logger.info(f"match rate: {self.match_num / (self.match_num + self.unmatch_num) * 100:.2f}%")
+        match_num = 0
+        undetermined_num = len(self.undetermined)
+
+        logger.info("Sample_ID\tCounts")
+
+        for sample_id, seq_id_list in self.match_dict.items():
+            logger.info(f"{sample_id}\t{len(seq_id_list)}")
+
+            match_num += len(seq_id_list)
+
+        logger.info(f"Undetermined\t{undetermined_num}")
+        logger.info(f"Determined rate: {match_num / (match_num + undetermined_num) * 100:.2f}%")
 
     def run(self, raw,  read_direction, dry):
         suffix = "R1" if read_direction in ["forward", "Forward", "F", "R1"] else "R2"
@@ -118,7 +117,7 @@ class SingleEndDemux():
         self._remove_empty()
         if not dry:
             self._write_sample_fastq(raw, suffix)
-            self._write_unmatch_fastq(raw)
+            self._write_undetermined_fastq(raw)
         self._report_match_rate()
 
 class PairedEndDemux():
@@ -148,10 +147,10 @@ class PairedEndDemux():
             "FR": {}, # seqs in forward file match reverse index
             "RF": {}, # seqs in reverse file match forward index
         }
-        self.unmatch_dict = {"F": [], "R": []} # seqs did not match any index in forward or reverse file
+        self.unmatch_dict = {"F": [], "R": []} # seqs did not matched  both in forward and reverse file
+        self.undetermined_dict = {"F": [], "R": []} # seqs did not match any index in forward or reverse file
         self.match_num = {}
         self.unmatch_num = {}
-        self.undetermined_num = 0
         self._read_barcode(index_path)
         self._init_dict()
         self.for_trie = Trie(self.for_barcode)
@@ -195,8 +194,7 @@ class PairedEndDemux():
         if match_sample_id:
             self.match_dict[f"{read_direct}{index_direct}"][match_sample_id].append(seq_id)
         else:
-            self.unmatch_dict[read_direct].append(seq_id)
-            self.undetermined_num += 1
+            self.undetermined_dict[read_direct].append(seq_id)
 
     def _get_match_dict(self, fastq_gz, read_direct):
         with gzip.open(fastq_gz, 'rt') as in_handle:
@@ -225,7 +223,6 @@ class PairedEndDemux():
                 for_unmatches.extend(only_forward_seq_ids)
                 self.unmatch_num[sample_id] += len(only_forward_seq_ids)
 
-    
         for sample_id, reverse_seq_ids in rev_match_dict.items():
             if sample_id not in for_match_dict:
                 rev_unmatches.extend(reverse_seq_ids)
@@ -252,17 +249,38 @@ class PairedEndDemux():
         self._write_fastq(for_raw, self.unmatch_dict["F"], f"{self.save_dir}/unmatched_R1.fastq.gz")
         self._write_fastq(rev_raw, self.unmatch_dict["R"], f"{self.save_dir}/unmatched_R2.fastq.gz")
 
-    def _report_match_rate(self):
-        logger = add_logger(os.path.join(self.save_dir, "match_rate.log"))
-        logger.info("Sample_ID\tCounts\tMatch_Rate")
-        total_counts = 0
-        for sample_id in self.sample_id_list:
-            counts = self.match_num[sample_id] + self.unmatch_num[sample_id]
-            total_counts += counts
-            match_rate = self.match_num[sample_id] / counts
-            logger.info(f"{sample_id}\t{counts}\t{match_rate:.2f}")
+    def _write_undetermined_fastq(self, for_raw, rev_raw):
+        self._write_fastq(for_raw, self.undetermined_dict["F"], f"{self.save_dir}/undetermined_R1.fastq.gz")
+        self._write_fastq(rev_raw, self.undetermined_dict["R"], f"{self.save_dir}/undetermined_R2.fastq.gz")
 
-        logger.info(f"Undetermined\t{self.undetermined_num}\tUndetermined_Rate:{self.undetermined_num/total_counts:.2f}")
+    def _calculate_sample_stats(self):
+        self.sample_stats = {}
+        self.total_unmatch_num = 0
+        self.undetermined_num = len(set(self.undetermined_dict["F"] + self.undetermined_dict["R"]))
+        total_num = self.undetermined_num
+
+        for sample_id in self.sample_id_list:
+            match_num = self.match_num[sample_id]
+            unmatch_num = self.unmatch_num[sample_id]
+            num = match_num + unmatch_num
+            match_rate = match_num / num
+            self.sample_stats[sample_id] = (num, match_num, match_rate)
+            total_num += num
+            self.total_unmatch_num += unmatch_num
+
+        self.unmatched_rate = self.total_unmatch_num / total_num
+        self.undetermined_rate = self.undetermined_num / total_num
+    
+    def _log_sample_stats(self):
+        logger.info("Sample_ID\tReads\tMatched_Reads\tMatched_Rate")
+        for sample_id, (total, matched, match_rate) in self.sample_stats.items():
+            logger.info(f"{sample_id}\t{total}\t{matched}\t{match_rate:.2f}")
+        logger.info(f"Total_Unmatched\tReads:{self.total_unmatch_num}\tRate:{self.unmatched_rate:.2f}")
+        logger.info(f"Total_Undetermined\tReads:{self.undetermined_num}\tRate:{self.undetermined_rate:.2f}")
+
+    def _report_match_rate(self):
+        self._calculate_sample_stats()
+        self._log_sample_stats()
 
     def run(self, for_raw, rev_raw, dry):
         self._get_match_dict(for_raw, "F")
@@ -280,5 +298,6 @@ class PairedEndDemux():
             self._write_sample_fastq(rev_raw, for_raw)
 
             self._write_unmatch_fastq(for_raw, rev_raw)
+            self._write_undetermined_fastq(for_raw, rev_raw)
         
         self._report_match_rate()
