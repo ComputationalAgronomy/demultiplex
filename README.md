@@ -27,6 +27,7 @@ demux = SingleEndDemux(
     raw_path = "/path/to/rawdata.fastq.gz",
     save_dir = "/path/to/save/dir/",
     allow_mismatch = 0,
+    threads = None,
     read_direction = "forward"
 )
 ```
@@ -37,6 +38,8 @@ demux = SingleEndDemux(
 `save_dir`: The directory to save demultiplexed .FASTQ.GZ file.
 
 `allow_mismatch`: allow mismatch for barcode matching. Default is `0`.
+
+`threads`: Number of CPU cores to be used for processing. If not specify, will use all. Default is `None`.
 
 `read_direction`: `forward` or `reverse`. Default is `"forward"`
 
@@ -49,7 +52,8 @@ demux = PairedEndDemux(
     for_raw_path = "/path/to/rawdata_R1.fastq.gz",
     rev_raw_path = "/path/to/rawdata_R2.fastq.gz",
     save_dir = "/path/to/save/dir/",
-    allow_mismatch = 0
+    allow_mismatch = 0,
+    threads = None
 )
 ```
 `index_path`: path to index .TXT file, format: `SAMPLE_ID<tab>FORWARD_INDEX<tab>REVERSE_INDEX`
