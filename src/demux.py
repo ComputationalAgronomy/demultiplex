@@ -124,34 +124,26 @@ class SingleEndDemux():
     def _remove_empty(self):
         self.match_dict = {k: v for k, v in self.match_dict.items() if v!=[]}
 
-    def _write_fastq(fastq_gz, seq_id_list, save_path):
-        with gzip.open(fastq_gz, 'rt') as in_handle, gzip.open(save_path, 'at') as out_handle:
-            for record in SeqIO.parse(in_handle, "fastq"):
-                if record.id in seq_id_list:
-                    SeqIO.write(record, out_handle, "fastq")
-
-    def _write_chunk_match_fastq(chunk, raw, save_dir, suffix):
-        for sample_id, seq_id_list in chunk:
-            save_path = f"{save_dir}/{sample_id}_{suffix}.fastq.gz"
-            SingleEndDemux._write_fastq(raw, seq_id_list, save_path)
+    def _write_fastq(save_path, record):
+        with gzip.open(save_path, 'at') as out_handle:
+            SeqIO.write(record, out_handle, "fastq")
 
     def _write_match_fastq(self, raw):
-        id_set = [(sample_id, seq_id_list) for sample_id, seq_id_list in self.match_dict.items()]
-
-        chunk_size = len(id_set) // self.threads + 1
-        chunks = [id_set[i:i+chunk_size] for i in range(0, len(id_set), chunk_size)]
-        with mp.Pool() as pool:
-            func = partial(
-                SingleEndDemux._write_chunk_match_fastq,
-                raw = raw,
-                save_dir = self.save_dir,
-                suffix = self.suffix,
-            )
-            tqdm(pool.map(func, chunks), total=len(chunks), desc="Writing Matches FASTQ...")
+        with gzip.open(raw, 'rt') as in_handle:
+            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc=f"Writing Matches FASTQ..."):
+                for sample_id, seq_id_list in self.match_dict.items():
+                    if record.id in seq_id_list:
+                        save_path = f"{self.save_dir}/{sample_id}_{self.suffix}.fastq.gz"
+                        SingleEndDemux._write_fastq(save_path, record)
+                        break
 
     def _write_undetermined_fastq(self, raw):
         logger.info("Writing Undetermined FASTQ...")
-        SingleEndDemux._write_fastq(raw, self.undetermined, f"{self.save_dir}/undetermined.fastq.gz")
+        save_path = f"{self.save_dir}/Undetermined_{self.suffix}.fastq.gz"
+        with gzip.open(raw, 'rt') as in_handle, gzip.open(save_path, 'at') as out_handle:
+            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc=f"Writing Undetermined FASTQ..."):
+                if record.id in self.undetermined:
+                    SeqIO.write(record, out_handle, "fastq")
 
     def _report_match_rate(self):
         match_num = 0
@@ -344,43 +336,27 @@ class PairedEndDemux():
                 rev_unmatches.extend(only_reverse_seq_ids)
                 self.unmatch_num[sample_id] += len(only_reverse_seq_ids)
 
-    def _write_fastq(fastq_gz, seq_id_list, save_path):
-        with gzip.open(fastq_gz, 'rt') as in_handle, gzip.open(save_path, 'at') as out_handle:
+    def _write_fastq(save_path, record):
+        with gzip.open(save_path, 'at') as out_handle:
+            SeqIO.write(record, out_handle, "fastq")
+
+    def _write_match_fastq(self, raw, suffix):
+        direction = "Forward" if suffix == "R1" else "Reverse"
+        with gzip.open(raw, 'rt') as in_handle:
+            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc=f"Writing {direction} Matches FASTQ..."):
+                for sample_id, seq_id_list in self.common_match_dict.items():
+                    if record.id in seq_id_list:
+                        save_path = f"{self.save_dir}/{sample_id}_{suffix}.fastq.gz"
+                        PairedEndDemux._write_fastq(save_path, record)
+                        break
+
+    def _write_unmatch_fastq(self, raw, query_list, save_path, type):
+        logger.info(f"Writing {type} FASTQ...")
+        with gzip.open(raw, 'rt') as in_handle:
             for record in SeqIO.parse(in_handle, "fastq"):
-                if record.id in seq_id_list:
-                    SeqIO.write(record, out_handle, "fastq")
-
-    def _write_chunk_match_fastq(chunk, for_raw, rev_raw, save_dir):
-        for sample_id, seq_id_list in chunk:
-            save_path = f"{save_dir}/{sample_id}_R1.fastq.gz"
-            PairedEndDemux._write_fastq(for_raw, seq_id_list, save_path)
-            save_path = f"{save_dir}/{sample_id}_R2.fastq.gz"
-            PairedEndDemux._write_fastq(rev_raw, seq_id_list, save_path)
-
-    def _write_match_fastq(self, for_raw, rev_raw):
-        id_set = [(sample_id, seq_id_list) for sample_id, seq_id_list in self.common_match_dict.items()]
-
-        chunk_size = len(id_set) // self.threads + 1
-        chunks = [id_set[i:i+chunk_size] for i in range(0, len(id_set), chunk_size)]
-
-        with mp.Pool() as pool:
-            func = partial(
-                PairedEndDemux._write_chunk_match_fastq,
-                for_raw = for_raw,
-                rev_raw = rev_raw,
-                save_dir = self.save_dir
-            )
-            tqdm(pool.map(func, chunks), total=len(chunks), desc="Writing Matches FASTQ...")
-
-    def _write_unmatch_fastq(self, for_raw, rev_raw):
-        logger.info("Writing Unmatched FASTQ...")
-        PairedEndDemux._write_fastq(for_raw, self.unmatch_dict["F"], f"{self.save_dir}/unmatched_R1.fastq.gz")
-        PairedEndDemux._write_fastq(rev_raw, self.unmatch_dict["R"], f"{self.save_dir}/unmatched_R2.fastq.gz")
-
-    def _write_undetermined_fastq(self, for_raw, rev_raw):
-        logger.info("Writing Undetermined FASTQ...")
-        PairedEndDemux._write_fastq(for_raw, self.undetermined_dict["F"], f"{self.save_dir}/undetermined_R1.fastq.gz")
-        PairedEndDemux._write_fastq(rev_raw, self.undetermined_dict["R"], f"{self.save_dir}/undetermined_R2.fastq.gz")
+                if record.id in query_list:
+                    PairedEndDemux._write_fastq(save_path, record)
+                    break
 
     def _calculate_sample_stats(self):
         self.sample_stats = {}
@@ -419,13 +395,19 @@ class PairedEndDemux():
         self._find_common_matches(self.match_dict["FF"], self.match_dict["RR"])
         self._find_unmatches(self.match_dict["FF"], self.match_dict["RR"], self.unmatch_dict["F"], self.unmatch_dict["R"])
         if not dry:
-            self._write_match_fastq(for_raw, rev_raw)
+            self._write_match_fastq(for_raw, "R1")
+            self._write_match_fastq(rev_raw, "R2")
 
         self._find_common_matches(self.match_dict["RF"], self.match_dict["FR"])
         self._find_unmatches(self.match_dict["RF"], self.match_dict["FR"], self.unmatch_dict["R"], self.unmatch_dict["F"])
         if not dry:
-            self._write_match_fastq(rev_raw, for_raw)
-            self._write_unmatch_fastq(for_raw, rev_raw)
-            self._write_undetermined_fastq(for_raw, rev_raw)
+            self._write_match_fastq(rev_raw, "R1")
+            self._write_match_fastq(for_raw, "R2")
+
+            self._write_unmatch_fastq(for_raw, self.unmatch_dict["F"], f"{self.save_dir}/unmatched_R1.fastq.gz", type="Unmatched")
+            self._write_unmatch_fastq(rev_raw, self.unmatch_dict["R"], f"{self.save_dir}/unmatched_R2.fastq.gz", type="Unmatched")
+
+            self._write_unmatch_fastq(for_raw, self.undetermined_dict["F"], f"{self.save_dir}/undetermined_R1.fastq.gz", type="Undetermined")
+            self._write_unmatch_fastq(rev_raw, self.undetermined_dict["R"], f"{self.save_dir}/undetermined_R2.fastq.gz", type="Undetermined")
         
         self._report_match_rate()
