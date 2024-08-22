@@ -358,8 +358,10 @@ class PairedEndDemux():
                             records[sample_id] = []
                         records[sample_id].append(record)
                         i += 1
-                        if i > 10000:
+                        if i > 100000:
                             self._write_record(records, suffix)
+                            records = {}
+                            i = 0
                         break
             self._write_record(records, suffix)
 
