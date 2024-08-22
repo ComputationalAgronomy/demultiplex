@@ -340,15 +340,28 @@ class PairedEndDemux():
         with gzip.open(save_path, 'at') as out_handle:
             SeqIO.write(record, out_handle, "fastq")
 
+    def _write_record(self, records, suffix):
+        for sample_id, record in records.items():
+            save_path = f"{self.save_dir}/{sample_id}_{suffix}.fastq.gz"
+            with gzip.open(save_path, 'at') as out_handle:
+                SeqIO.write(record, out_handle, "fastq")
+
     def _write_match_fastq(self, raw, suffix):
+        records = {}
+        i = 0
         direction = "Forward" if suffix == "R1" else "Reverse"
         with gzip.open(raw, 'rt') as in_handle:
             for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc=f"Writing {direction} Matches FASTQ..."):
                 for sample_id, seq_id_list in self.common_match_dict.items():
                     if record.id in seq_id_list:
-                        save_path = f"{self.save_dir}/{sample_id}_{suffix}.fastq.gz"
-                        PairedEndDemux._write_fastq(save_path, record)
+                        if sample_id not in records:
+                            records[sample_id] = []
+                        records[sample_id].append(record)
+                        i += 1
+                        if i > 10000:
+                            self._write_record(records, suffix)
                         break
+            self._write_record(records, suffix)
 
     def _write_unmatch_fastq(self, raw, query_list, save_path, type):
         logger.info(f"Writing {type} FASTQ...")
