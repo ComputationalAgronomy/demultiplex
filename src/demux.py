@@ -4,6 +4,7 @@ from dict_trie import Trie
 from functools import partial
 import logging
 import multiprocessing as mp
+import tqdm
 
 
 FORMAT = "%(message)s"
@@ -50,15 +51,20 @@ class SingleEndDemux():
         self.run(raw_path, dry)
 
     def _read_barcode(self, barcode_path):
-        self.sample_id_list = []
-        self.barcode = []
-        with open(barcode_path, 'r') as f:
-            for line in f:
-                line = line.strip().split("\t")
-                self.sample_id_list.append(line[0])
-                self.barcode.append(line[1])
-        self.barcode_len = len(self.barcode[0])
-    
+        try:
+            logger.info("Reading Index file...")
+            self.sample_id_list = []
+            self.barcode = []
+            with open(barcode_path, 'r') as f:
+                for line in f:
+                    line = line.strip().split("\t")
+                    self.sample_id_list.append(line[0])
+                    self.barcode.append(line[1])
+            self.barcode_len = len(self.barcode[0])
+        except Exception as e:
+            logger.error(f"Error reading Index file: {e}. Error line: {line}")
+            raise e
+
     def _init_dict(self):
         for sample_id in self.sample_id_list:
             self.match_dict[sample_id] = []
@@ -108,7 +114,7 @@ class SingleEndDemux():
                 allow_dist = self.allow_dist,
                 query_id_list = self.sample_id_list,
             )
-            results = pool.map(func, chunks)
+            results = list(tqdm.tqdm(pool.map(func, chunks), total=len(chunks), desc="Matching Index"))
 
         for match_dict, undetermined in results:
             for sample_id, seq_ids in match_dict.items():
@@ -142,9 +148,10 @@ class SingleEndDemux():
                 save_dir = self.save_dir,
                 suffix = self.suffix,
             )
-            pool.map(func, chunks)
+            tqdm.tqdm(pool.map(func, chunks), total=len(chunks), desc="Writing Matches FASTQ")
 
     def _write_undetermined_fastq(self, raw):
+        logger.info("Writing Undetermined FASTQ")
         SingleEndDemux._write_fastq(raw, self.undetermined, f"{self.save_dir}/undetermined.fastq.gz")
 
     def _report_match_rate(self):
@@ -210,16 +217,21 @@ class PairedEndDemux():
         self.run(for_raw_path, rev_raw_path, dry)
 
     def _read_barcode(self, barcode_path):
-        self.sample_id_list = []
-        self.for_barcode = []
-        self.rev_barcode = []
-        with open(barcode_path, 'r') as f:
-            for line in f:
-                line = line.strip().split("\t")
-                self.sample_id_list.append(line[0])
-                self.for_barcode.append(line[1])
-                self.rev_barcode.append(line[2])
-        self.barcode_len = len(self.for_barcode[0])
+        try:
+            logger.info("Reading Index file...")
+            self.sample_id_list = []
+            self.for_barcode = []
+            self.rev_barcode = []
+            with open(barcode_path, 'r') as f:
+                for line in f:
+                    line = line.strip().split("\t")
+                    self.sample_id_list.append(line[0])
+                    self.for_barcode.append(line[1])
+                    self.rev_barcode.append(line[2])
+            self.barcode_len = len(self.for_barcode[0])
+        except Exception as e:
+            logger.error(f"Error reading Index file: {e}. Error line: {line}")
+            raise e
 
     def _init_dict(self):
         for sample_id in self.sample_id_list:
@@ -293,7 +305,7 @@ class PairedEndDemux():
                 query_id_list = self.sample_id_list,
                 read_direct = read_direct,
             )
-            results = pool.map(func, chunks)
+            results = list(tqdm.tqdm(pool.map(func, chunks), total=len(chunks), desc="Matching Index"))
 
         for match_dict, undetermined_dict in results:
             for direct, match in match_dict.items():
@@ -360,13 +372,15 @@ class PairedEndDemux():
                 rev_raw = rev_raw,
                 save_dir = self.save_dir
             )
-            pool.map(func, chunks)
+            tqdm.tqdm(pool.map(func, chunks), total=len(chunks), desc="Writing Matches FASTQ")
 
     def _write_unmatch_fastq(self, for_raw, rev_raw):
+        logger.info("Writing Unmatched FASTQ")
         PairedEndDemux._write_fastq(for_raw, self.unmatch_dict["F"], f"{self.save_dir}/unmatched_R1.fastq.gz")
         PairedEndDemux._write_fastq(rev_raw, self.unmatch_dict["R"], f"{self.save_dir}/unmatched_R2.fastq.gz")
 
     def _write_undetermined_fastq(self, for_raw, rev_raw):
+        logger.info("Writing Undetermined FASTQ")
         PairedEndDemux._write_fastq(for_raw, self.undetermined_dict["F"], f"{self.save_dir}/undetermined_R1.fastq.gz")
         PairedEndDemux._write_fastq(rev_raw, self.undetermined_dict["R"], f"{self.save_dir}/undetermined_R2.fastq.gz")
 
