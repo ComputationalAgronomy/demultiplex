@@ -1,9 +1,12 @@
 import gzip
 from Bio import SeqIO
+from Bio.SeqIO.QualityIO import FastqGeneralIterator 
 from dict_trie import Trie
 from functools import partial
 import logging
 import multiprocessing as mp
+import os
+import shutil
 from tqdm import tqdm
 
 
@@ -17,7 +20,52 @@ sh.setLevel(logging.INFO)
 sh.setFormatter(formatter)
 logger.addHandler(sh)
 
-class SingleEndDemux():
+class Demux():
+    def __init__(self, save_dir, allow_mismatch, threads):
+        self.save_dir = save_dir
+        self.allow_dist = allow_mismatch
+        self.threads = threads if threads else mp.cpu_count()
+
+    @staticmethod
+    def _approximate_match(seq, trie, allow_dist, query_id_list) -> str:
+        match_barcode = trie.best_levenshtein(seq, allow_dist)
+        if match_barcode:
+            match_index = list(trie).index(match_barcode)
+            match_sample_id = query_id_list[match_index]
+            return match_sample_id
+        return None
+
+    def _get_chunks(self, fq_gz):
+        records = []
+        with gzip.open(fq_gz, 'rt') as in_handle:
+            for title, seq, _ in tqdm(FastqGeneralIterator(in_handle), desc="Reading raw data..."):
+                seq_id = title.split(" ")[0]    
+                seq = seq[: self.barcode_len]
+                records.append((seq_id, seq))
+
+        chunk_size = len(records) // self.threads + 1
+        self.chunks = [records[i:i+chunk_size] for i in range(0, len(records), chunk_size)]
+
+    @staticmethod
+    def _rm_empty(match_dict):
+        return {k: v for k, v in match_dict.items() if v!=[]}
+
+    @staticmethod
+    def _get_records(fq_gz, fq):
+        with gzip.open(fq_gz, 'rb') as f_in:
+            with open(fq, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+        records = SeqIO.index(fq, "fastq")
+        return records
+
+    @staticmethod
+    def _write_fastq(records, query_list, save_path):
+        with gzip.open(save_path, 'ab') as out_handle:
+            for seq_id in tqdm(query_list, total=len(query_list), desc=f"Writing {save_path}"):
+                out_handle.write(records.get_raw(seq_id))
+
+
+class SingleEndDemux(Demux):
     def __init__(self,
             index_path,
             raw_path,
@@ -38,12 +86,10 @@ class SingleEndDemux():
         :param read_direction: forward or reverse. Default is "forward"
         :param dry: dry run
         """
-        self.save_dir = save_dir
+        super().__init__(save_dir, allow_mismatch, threads)
         self.suffix = "R1" if read_direction in ["forward", "Forward", "F", "R1"] else "R2"
-        self.allow_dist = allow_mismatch
         self.match_dict = {}
         self.undetermined = []
-        self.threads = threads if threads else mp.cpu_count()
         self._read_barcode(index_path)
         self._init_dict()
         self.trie = Trie(self.barcode)
@@ -68,24 +114,14 @@ class SingleEndDemux():
         for sample_id in self.sample_id_list:
             self.match_dict[sample_id] = []
     
-    def _approximate_match(seq, trie, allow_dist, query_id_list) -> str:
-        match_barcode = trie.best_levenshtein(seq, allow_dist)
-        if match_barcode:
-            match_index = list(trie).index(match_barcode)
-            match_sample_id = query_id_list[match_index]
-            return match_sample_id
-        return None
+    def _approximate_match(self, seq) -> str:
+        return super()._approximate_match(seq, self.trie, self.allow_dist, self.sample_id_list)
 
-    def _get_chunk_match_dict(chunk, trie, allow_dist, query_id_list):
+    def _get_chunk_match_dict(self, chunk):
         match_dict = {}
         undetermined = []
         for seq_id, seq in chunk:
-            match_sample_id = SingleEndDemux._approximate_match(
-                seq,
-                trie,
-                allow_dist,
-                query_id_list,
-            )
+            match_sample_id = self._approximate_match(seq)
 
             if match_sample_id:
                 if match_sample_id not in match_dict:
@@ -96,78 +132,51 @@ class SingleEndDemux():
 
         return match_dict, undetermined
 
-    def _get_match_dict(self, fastq_gz):
-        records = []
-        with gzip.open(fastq_gz, 'rt') as in_handle:
-            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc="Reading raw data..."):
-                seq_id = record.id
-                seq = str(record.seq)[: self.barcode_len]
-                records.append((seq_id, seq))
+    def _get_match_dict(self, fq_gz):
+        self._get_chunks(fq_gz)
 
-        chunk_size = len(records) // self.threads + 1
-        chunks = [records[i:i+chunk_size] for i in range(0, len(records), chunk_size)]
         with mp.Pool() as pool:
-            func = partial(
-                SingleEndDemux._get_chunk_match_dict,
-                trie = self.trie,
-                allow_dist = self.allow_dist,
-                query_id_list = self.sample_id_list,
-            )
-            results = list(tqdm(pool.map(func, chunks), total=len(chunks), desc="Matching Index..."))
+            func = partial(self._get_chunk_match_dict)
+            results = list(tqdm(pool.imap(func, self.chunks), total=len(self.chunks), desc="Matching Index..."))
 
         for match_dict, undetermined in results:
             for sample_id, seq_ids in match_dict.items():
                 self.match_dict[sample_id].extend(seq_ids)
-
             self.undetermined.extend(undetermined)
 
-    def _remove_empty(self):
-        self.match_dict = {k: v for k, v in self.match_dict.items() if v!=[]}
+    def _rm_empty(self):
+        self.match_dict = super()._rm_empty(self.match_dict)
 
-    def _write_fastq(save_path, record):
-        with gzip.open(save_path, 'at') as out_handle:
-            SeqIO.write(record, out_handle, "fastq")
+    def _get_records(self, fq_gz):
+        self.records = super()._get_records(fq_gz, fq_gz.replace(".gz", ""))
 
-    def _write_match_fastq(self, raw):
-        with gzip.open(raw, 'rt') as in_handle:
-            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc=f"Writing Matches FASTQ..."):
-                for sample_id, seq_id_list in self.match_dict.items():
-                    if record.id in seq_id_list:
-                        save_path = f"{self.save_dir}/{sample_id}_{self.suffix}.fastq.gz"
-                        SingleEndDemux._write_fastq(save_path, record)
-                        break
+    def _write_match_fastq(self):
+        for sample_id, seq_id_list in self.match_dict.items():
+            save_path = f"{self.save_dir}/{sample_id}_{self.suffix}.fastq.gz"
+            super()._write_fastq(self.records, seq_id_list, save_path)
 
-    def _write_undetermined_fastq(self, raw):
-        logger.info("Writing Undetermined FASTQ...")
-        save_path = f"{self.save_dir}/Undetermined_{self.suffix}.fastq.gz"
-        with gzip.open(raw, 'rt') as in_handle, gzip.open(save_path, 'at') as out_handle:
-            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc=f"Writing Undetermined FASTQ..."):
-                if record.id in self.undetermined:
-                    SeqIO.write(record, out_handle, "fastq")
-
-    def _report_match_rate(self):
+    def _report(self):
         match_num = 0
         undetermined_num = len(self.undetermined)
 
         logger.info("Sample_ID\tCounts")
-
         for sample_id, seq_id_list in self.match_dict.items():
             logger.info(f"{sample_id}\t{len(seq_id_list)}")
-
             match_num += len(seq_id_list)
 
         logger.info(f"Undetermined\t{undetermined_num}")
         logger.info(f"Determined rate: {match_num / (match_num + undetermined_num) * 100:.2f}%")
 
-    def run(self, raw, dry):
-        self._get_match_dict(raw)
-        self._remove_empty()
+    def run(self, fq_gz, dry):
+        self._get_match_dict(fq_gz)
+        self._rm_empty()
+        self._get_records(fq_gz)
         if not dry:
-            self._write_match_fastq(raw)
-            self._write_undetermined_fastq(raw)
-        self._report_match_rate()
+            self._write_match_fastq()
+            super()._write_fastq(self.records, self.undetermined, f"{self.save_dir}/Undetermined_{self.suffix}.fastq.gz")
+        self._report()
 
-class PairedEndDemux():
+class PairedEndDemux(Demux):
     def __init__(self,
             index_path,
             for_raw_path: str,
@@ -188,8 +197,7 @@ class PairedEndDemux():
         :param threads: Number of CPU cores to be used for processing. If not specify, use all. Default is None.
         :param dry: dry run
         """
-        self.save_dir = save_dir
-        self.allow_dist = allow_mismatch
+        super().__init__(save_dir, allow_mismatch, threads)
         self.match_dict = {
             "FF": {}, # seqs in forward file match forward index
             "RR": {}, # seqs in reverse file match reverse index
@@ -200,7 +208,6 @@ class PairedEndDemux():
         self.undetermined_dict = {"F": [], "R": []} # seqs did not match any index in forward or reverse file
         self.match_num = {}
         self.unmatch_num = {}
-        self.threads = threads if threads else mp.cpu_count()
         self._read_barcode(index_path)
         self._init_dict()
         self.for_trie = Trie(self.for_barcode)
@@ -233,38 +240,21 @@ class PairedEndDemux():
             self.match_num[sample_id] = 0
             self.unmatch_num[sample_id] = 0 
 
-    def _approximate_match(seq, for_trie, rev_trie, allow_dist, query_id_list) -> str:
-        for trie, direction in [(for_trie, "F"), (rev_trie, "R")]:
-            match_barcode = trie.best_levenshtein(seq, allow_dist)
-            if match_barcode:
-                match_index = list(trie).index(match_barcode)
-                match_sample_id = query_id_list[match_index]
+    def _approximate_match(self, seq) -> str:
+        for trie, direction in [(self.for_trie, "F"), (self.rev_trie, "R")]:
+            match_sample_id = super()._approximate_match(seq, trie, self.allow_dist, self.sample_id_list)
+            if match_sample_id:
                 return match_sample_id, direction
         return None, None
 
-    def _get_chunk_match_dict(
-            chunk,
-            for_trie,
-            rev_trie,
-            allow_dist,
-            query_id_list,
-            read_direct
-        ):
+    def _get_chunk_match_dict(self, chunk, read_direct):
         match_dict = {
-            "FF": {}, 
-            "RR": {}, 
-            "FR": {}, 
-            "RF": {}, 
+            "FF": {}, "RR": {}, 
+            "FR": {}, "RF": {}, 
         }
         undetermined_dict = {"F": [], "R": []}
         for seq_id, seq in chunk:
-            match_sample_id, index_direct = PairedEndDemux._approximate_match(
-                seq,
-                for_trie,
-                rev_trie,
-                allow_dist,
-                query_id_list,
-            )
+            match_sample_id, index_direct = self._approximate_match(seq)
 
             if match_sample_id:
                 if match_sample_id not in match_dict[f"{read_direct}{index_direct}"]:
@@ -275,27 +265,12 @@ class PairedEndDemux():
 
         return match_dict, undetermined_dict
 
-    def _get_match_dict(self, fastq_gz, read_direct):
-        records = []
-        with gzip.open(fastq_gz, 'rt') as in_handle:
-            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc="Reading raw data..."):
-                seq_id = record.id
-                seq = str(record.seq)[: self.barcode_len]
-                records.append((seq_id, seq))
-
-        chunk_size = len(records) // self.threads + 1
-        chunks = [records[i:i+chunk_size] for i in range(0, len(records), chunk_size)]
+    def _get_match_dict(self, fq_gz, read_direct):
+        self._get_chunks(fq_gz)
 
         with mp.Pool() as pool:
-            func = partial(
-                PairedEndDemux._get_chunk_match_dict,
-                for_trie = self.for_trie,
-                rev_trie = self.rev_trie,
-                allow_dist = self.allow_dist,
-                query_id_list = self.sample_id_list,
-                read_direct = read_direct,
-            )
-            results = list(tqdm(pool.map(func, chunks), total=len(chunks), desc="Matching Index..."))
+            func = partial(self._get_chunk_match_dict, read_direct = read_direct)
+            results = list(tqdm(pool.imap(func, self.chunks), total=len(self.chunks), desc="Matching Index..."))
 
         for match_dict, undetermined_dict in results:
             for direct, match in match_dict.items():
@@ -305,11 +280,11 @@ class PairedEndDemux():
             for read_direct, seq_ids in undetermined_dict.items():
                 self.undetermined_dict[read_direct].extend(seq_ids)
 
-    def _remove_empty(self):
+    def _rm_empty(self):
         for key, match in self.match_dict.items():
-            self.match_dict[key] = {k: v for k, v in match.items() if v!=[]}
+            self.match_dict[key] = super()._rm_empty(match)
 
-    def _find_common_matches(self, forward_matches, reverse_matches):
+    def _find_matches(self, forward_matches, reverse_matches):
         common_sample_ids = set(forward_matches) & set(reverse_matches)
         self.common_match_dict = {}
         for sample_id in common_sample_ids:
@@ -336,93 +311,62 @@ class PairedEndDemux():
                 rev_unmatches.extend(only_reverse_seq_ids)
                 self.unmatch_num[sample_id] += len(only_reverse_seq_ids)
 
-    def _write_fastq(save_path, record):
-        with gzip.open(save_path, 'at') as out_handle:
-            SeqIO.write(record, out_handle, "fastq")
+    def _get_records(self, for_fq_gz, rev_fq_gz):
+        for_fq = for_fq_gz.replace(".gz", "")
+        self.for_records = super()._get_records(for_fq_gz, for_fq)
+        rev_fq = rev_fq_gz.replace(".gz", "")
+        self.rev_records = super()._get_records(rev_fq_gz, rev_fq)
 
-    def _write_record(self, records, suffix):
-        for sample_id, record in records.items():
-            save_path = f"{self.save_dir}/{sample_id}_{suffix}.fastq.gz"
-            with gzip.open(save_path, 'at') as out_handle:
-                SeqIO.write(record, out_handle, "fastq")
+    def _write_match_fastq(self, records, suffix):
+        for sample_id, seq_id_list in self.common_match_dict.items():
+            save_path = os.path.join(self.save_dir, f"{sample_id}_{suffix}.fastq.gz")
+            super()._write_fastq(records, seq_id_list, save_path)
 
-    def _write_match_fastq(self, raw, suffix):
-        records = {}
-        i = 0
-        direction = "Forward" if suffix == "R1" else "Reverse"
-        with gzip.open(raw, 'rt') as in_handle:
-            for record in tqdm(SeqIO.parse(in_handle, "fastq"), desc=f"Writing {direction} Matches FASTQ..."):
-                for sample_id, seq_id_list in self.common_match_dict.items():
-                    if record.id in seq_id_list:
-                        if sample_id not in records:
-                            records[sample_id] = []
-                        records[sample_id].append(record)
-                        i += 1
-                        if i > 100000:
-                            self._write_record(records, suffix)
-                            records = {}
-                            i = 0
-                        break
-            self._write_record(records, suffix)
-
-    def _write_unmatch_fastq(self, raw, query_list, save_path, type):
-        logger.info(f"Writing {type} FASTQ...")
-        with gzip.open(raw, 'rt') as in_handle:
-            for record in SeqIO.parse(in_handle, "fastq"):
-                if record.id in query_list:
-                    PairedEndDemux._write_fastq(save_path, record)
-                    break
-
-    def _calculate_sample_stats(self):
-        self.sample_stats = {}
-        self.total_unmatch_num = 0
-        self.undetermined_num = len(set(self.undetermined_dict["F"] + self.undetermined_dict["R"]))
-        total_num = self.undetermined_num
+    def _report(self):
+        sample_stats = {}
+        total_unmatch_num = 0
+        undetermined_num = len(set(self.undetermined_dict["F"] + self.undetermined_dict["R"]))
+        total_num = undetermined_num
 
         for sample_id in self.sample_id_list:
             match_num = self.match_num[sample_id]
             unmatch_num = self.unmatch_num[sample_id]
             num = match_num + unmatch_num
-            match_rate = match_num / num
-            self.sample_stats[sample_id] = (num, match_num, match_rate)
+            sample_stats[sample_id] = (num, match_num, match_num / num)
             total_num += num
-            self.total_unmatch_num += unmatch_num
+            total_unmatch_num += unmatch_num
 
-        self.unmatched_rate = self.total_unmatch_num / total_num
-        self.undetermined_rate = self.undetermined_num / total_num
-    
-    def _log_sample_stats(self):
         logger.info("Sample_ID\tReads\tMatched_Reads\tMatched_Rate")
-        for sample_id, (total, matched, match_rate) in self.sample_stats.items():
+        for sample_id, (total, matched, match_rate) in sample_stats.items():
             logger.info(f"{sample_id}\t{total}\t{matched}\t{match_rate:.2f}")
-        logger.info(f"Total_Unmatched\tReads:{self.total_unmatch_num}\tRate:{self.unmatched_rate:.2f}")
-        logger.info(f"Total_Undetermined\tReads:{self.undetermined_num}\tRate:{self.undetermined_rate:.2f}")
+        logger.info(f"Total_Unmatched\tReads:{total_unmatch_num}\tRate:{total_unmatch_num / total_num:.2f}")
+        logger.info(f"Total_Undetermined\tReads:{undetermined_num}\tRate:{undetermined_num / total_num:.2f}")
 
-    def _report_match_rate(self):
-        self._calculate_sample_stats()
-        self._log_sample_stats()
+    def run(self, for_fq_gz, rev_fq_gz, dry):
+        self._get_match_dict(for_fq_gz, "F")
+        self._get_match_dict(rev_fq_gz, "R")
+        self._rm_empty()
 
-    def run(self, for_raw, rev_raw, dry):
-        self._get_match_dict(for_raw, "F")
-        self._get_match_dict(rev_raw, "R")
-        self._remove_empty()
+        if not dry:
+            self._get_records(for_fq_gz, rev_fq_gz)
 
-        self._find_common_matches(self.match_dict["FF"], self.match_dict["RR"])
+        self._find_matches(self.match_dict["FF"], self.match_dict["RR"])
         self._find_unmatches(self.match_dict["FF"], self.match_dict["RR"], self.unmatch_dict["F"], self.unmatch_dict["R"])
         if not dry:
-            self._write_match_fastq(for_raw, "R1")
-            self._write_match_fastq(rev_raw, "R2")
+            self._write_match_fastq(self.for_records, "R1")
+            self._write_match_fastq(self.rev_records, "R2")
 
-        self._find_common_matches(self.match_dict["RF"], self.match_dict["FR"])
+        self._find_matches(self.match_dict["RF"], self.match_dict["FR"])
         self._find_unmatches(self.match_dict["RF"], self.match_dict["FR"], self.unmatch_dict["R"], self.unmatch_dict["F"])
         if not dry:
-            self._write_match_fastq(rev_raw, "R1")
-            self._write_match_fastq(for_raw, "R2")
+            self._write_match_fastq(self.rev_records, "R1")
+            self._write_match_fastq(self.for_records, "R2")
 
-            self._write_unmatch_fastq(for_raw, self.unmatch_dict["F"], f"{self.save_dir}/unmatched_R1.fastq.gz", type="Unmatched")
-            self._write_unmatch_fastq(rev_raw, self.unmatch_dict["R"], f"{self.save_dir}/unmatched_R2.fastq.gz", type="Unmatched")
+        if not dry:
+            super()._write_fastq(self.for_records, set(self.unmatch_dict["F"]), f"{self.save_dir}/unmatched_R1.fastq.gz")
+            super()._write_fastq(self.rev_records, set(self.unmatch_dict["R"]), f"{self.save_dir}/unmatched_R2.fastq.gz")
 
-            self._write_unmatch_fastq(for_raw, self.undetermined_dict["F"], f"{self.save_dir}/undetermined_R1.fastq.gz", type="Undetermined")
-            self._write_unmatch_fastq(rev_raw, self.undetermined_dict["R"], f"{self.save_dir}/undetermined_R2.fastq.gz", type="Undetermined")
+            super()._write_fastq(self.for_records, set(self.undetermined_dict["F"]), f"{self.save_dir}/undetermined_R1.fastq.gz")
+            super()._write_fastq(self.rev_records, set(self.undetermined_dict["R"]), f"{self.save_dir}/undetermined_R2.fastq.gz")
         
-        self._report_match_rate()
+        self._report()
