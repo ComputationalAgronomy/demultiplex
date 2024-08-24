@@ -26,20 +26,20 @@ demux = SingleEndDemux(
     index_path = "/path/to/index.txt",
     raw_path = "/path/to/rawdata.fastq.gz",
     save_dir = "/path/to/save/dir/",
-    allow_mismatch = 0,
+    allow_mismatch = None,
     threads = None,
     read_direction = "forward"
 )
 ```
-`index_path`: path to index .TXT file, format: `SAMPLE_ID<tab>INDEX`
+`index_path`: Path to index .TXT file, format: `SAMPLE_ID<tab>INDEX`
 
-`raw_path`: path to raw .FASTQ.GZ file.
+`raw_path`: Path to raw .FASTQ.GZ file.
 
 `save_dir`: The directory to save demultiplexed .FASTQ.GZ file.
 
-`allow_mismatch`: allow mismatch for barcode matching. Default is `0`.
+`allow_mismatch`: Allow mismatch for barcode matching. If not specified, automatically use an appropriate number. default is `None`.
 
-`threads`: Number of CPU cores to be used for processing. If not specify, will use all. Default is `None`.
+`threads`: Number of CPU cores to be used for processing. If not specified, maximum number of available cores will be used. Default is `None`.
 
 `read_direction`: `forward` or `reverse`. Default is `"forward"`
 
@@ -52,15 +52,15 @@ demux = PairedEndDemux(
     for_raw_path = "/path/to/rawdata_R1.fastq.gz",
     rev_raw_path = "/path/to/rawdata_R2.fastq.gz",
     save_dir = "/path/to/save/dir/",
-    allow_mismatch = 0,
+    allow_mismatch = None,
     threads = None
 )
 ```
-`index_path`: path to index .TXT file, format: `SAMPLE_ID<tab>FORWARD_INDEX<tab>REVERSE_INDEX`
+`index_path`: Path to index .TXT file, format: `SAMPLE_ID<tab>FORWARD_INDEX<tab>REVERSE_INDEX`
 
-`for_raw_path`: path to raw _R1.FASTQ.GZ file.
+`for_raw_path`: Path to raw _R1.FASTQ.GZ file.
 
-`rev_raw_path`: path to raw _R2.FASTQ.GZ file.
+`rev_raw_path`: Path to raw _R2.FASTQ.GZ file.
 
 ### Example
 You can use the `example.ipynb` notebook and the materials in the `example` folder to practice.
