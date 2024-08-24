@@ -1,3 +1,4 @@
 Bio==1.7.1
 biopython==1.83
-dict_trie==1.0.1
+rapidfuzz==3.9.6
+tqdm==4.66.2

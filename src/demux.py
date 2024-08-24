@@ -1,14 +1,13 @@
 import gzip
 from Bio import SeqIO
 from Bio.SeqIO.QualityIO import FastqGeneralIterator 
-from dict_trie import Trie
-from functools import partial
 import logging
 import multiprocessing as mp
 import os
+from rapidfuzz import process
+from rapidfuzz.distance import Levenshtein
 import shutil
 from tqdm import tqdm
-import time
 
 
 FORMAT = "%(message)s"
@@ -20,6 +19,24 @@ sh = logging.StreamHandler()
 sh.setLevel(logging.INFO)
 sh.setFormatter(formatter)
 logger.addHandler(sh)
+
+
+class FuzzyMatch():
+    def __init__(self, choices: list[str]):
+        self.choices = choices
+
+    def best_levenshtein(self, query, allow_dist):
+        return process.extractOne(query, self.choices, scorer=Levenshtein.distance, score_cutoff=allow_dist)
+
+    def all_levenshtein(self, query, allow_dist):
+        return process.extract(query, self.choices, scorer=Levenshtein.distance, score_cutoff=allow_dist)
+        
+    def aslist(self):
+        return self.choices
+
+    def __iter__(self):
+        return iter(self.aslist())
+
 
 class Demux():
     def __init__(self, save_dir, allow_mismatch, threads):
@@ -46,12 +63,12 @@ class Demux():
                 self.threads = max
 
     @staticmethod
-    def _get_proper_mismatch(trie):
-        barcode_len = len(next(iter(trie)))
+    def _get_proper_mismatch(fm):
+        barcode_len = len(next(iter(fm)))
         for allow_mismatch in range(barcode_len):
-            for index in list(trie):
-                result = trie.all_levenshtein(index, allow_mismatch)
-                if len(set(result)) > 1:
+            for index in list(fm):
+                result = fm.all_levenshtein(index, allow_mismatch)
+                if len(result) > 1:
                     return allow_mismatch - 1
 
     def _judge_mismatch(self, proper_mismatch):
@@ -64,11 +81,10 @@ class Demux():
             pass
 
     @staticmethod
-    def _approx_match(seq, trie, allow_dist, query_id_list) -> str:
-        match_barcode = trie.best_levenshtein(seq, allow_dist)
-        if match_barcode:
-            match_index = list(trie).index(match_barcode)
-            match_sample_id = query_id_list[match_index]
+    def _approx_match(seq, fm, allow_dist, query_id_list) -> str:
+        result = fm.best_levenshtein(seq, allow_dist)
+        if result:
+            match_sample_id = query_id_list[result[2]]
             return match_sample_id
         return None
 
@@ -123,7 +139,7 @@ class SingleEndDemux(Demux):
         :param index_path: path to barcode file, format: <sample_id>\\t<barcode>.
         :param raw_path: path to raw .fastq.gz file.
         :param save_dir: The directory to save demultiplexed fastq.gz file.
-        :param allow_mismatch: allow distance for barcode matching. Default is 0.
+        :param allow_mismatch: allow distance for barcode matching. If not specify, automatically use proper number. Default is None
         :param threads: Number of CPU cores to be used for processing. If not specify, use all. Default is None.
         :param read_direction: forward or reverse. Default is "forward"
         :param dry: dry run
@@ -134,7 +150,7 @@ class SingleEndDemux(Demux):
         self.undetermined = []
         self._read_barcode(index_path)
         self._init_dict()
-        self.trie = Trie(self.barcode)
+        self.fm = FuzzyMatch(self.barcode)
         self._get_proper_mismatch()
         self.run(raw_path, dry)
 
@@ -157,11 +173,11 @@ class SingleEndDemux(Demux):
             self.match_dict[sample_id] = []
 
     def _get_proper_mismatch(self):
-        proper_mismatch = super()._get_proper_mismatch(self.trie)
+        proper_mismatch = super()._get_proper_mismatch(self.fm)
         self._judge_mismatch(proper_mismatch)
 
     def _approx_match(self, seq) -> str:
-        return super()._approx_match(seq, self.trie, self.allow_mismatch, self.sample_id_list)
+        return super()._approx_match(seq, self.fm, self.allow_mismatch, self.sample_id_list)
 
     def _chunk_match_index(self, chunk, q):
         match_dict = {}
@@ -185,9 +201,9 @@ class SingleEndDemux(Demux):
         processes = []
 
         for chunk in self.chunks:
-            process = mp.Process(target=self._chunk_match_index, args=(chunk, queue,))
-            process.start()
-            processes.append(process)
+            p = mp.Process(target=self._chunk_match_index, args=(chunk, queue,))
+            p.start()
+            processes.append(p)
 
         for _ in tqdm(range(len(self.chunks)), desc="Matching Index..."):
             match_dict, undetermined = queue.get()
@@ -198,8 +214,8 @@ class SingleEndDemux(Demux):
 
             del match_dict, undetermined
 
-        for process in processes:
-            process.join()
+        for p in processes:
+            p.join()
 
     def _rm_empty(self):
         self.match_dict = super()._rm_empty(self.match_dict)
@@ -269,8 +285,8 @@ class PairedEndDemux(Demux):
         self.unmatch_num = {}
         self._read_barcode(index_path)
         self._init_dict()
-        self.for_trie = Trie(self.for_barcode)
-        self.rev_trie = Trie(self.rev_barcode)
+        self.for_fm = FuzzyMatch(self.for_barcode)
+        self.rev_fm = FuzzyMatch(self.rev_barcode)
         self._get_proper_mismatch()
         self.run(for_raw_path, rev_raw_path, dry)
 
@@ -300,14 +316,14 @@ class PairedEndDemux(Demux):
             self.unmatch_num[sample_id] = 0 
 
     def _get_proper_mismatch(self):
-        for_proper_mismatch = super()._get_proper_mismatch(self.for_trie)
-        rev_proper_mismatch = super()._get_proper_mismatch(self.rev_trie)
+        for_proper_mismatch = super()._get_proper_mismatch(self.for_fm)
+        rev_proper_mismatch = super()._get_proper_mismatch(self.rev_fm)
         proper_mismatch = min(for_proper_mismatch, rev_proper_mismatch)
         self._judge_mismatch(proper_mismatch)
 
     def _approx_match(self, seq) -> str:
-        for trie, direction in [(self.for_trie, "F"), (self.rev_trie, "R")]:
-            match_sample_id = super()._approx_match(seq, trie, self.allow_mismatch, self.sample_id_list)
+        for fm, direction in [(self.for_fm, "F"), (self.rev_fm, "R")]:
+            match_sample_id = super()._approx_match(seq, fm, self.allow_mismatch, self.sample_id_list)
             if match_sample_id:
                 return match_sample_id, direction
         return None, None
@@ -337,9 +353,9 @@ class PairedEndDemux(Demux):
 
         processes = []
         for chunk in tqdm(self.chunks, desc="Assigning match tasks..."):
-            process = mp.Process(target=self._chunk_match_index, args=(chunk, queue, read_direct,))
-            process.start()
-            processes.append(process)
+            p = mp.Process(target=self._chunk_match_index, args=(chunk, queue, read_direct,))
+            p.start()
+            processes.append(p)
 
         for _ in tqdm(range(len(self.chunks)), desc="Matching Index..."):
             match_dict, undetermined_dict = queue.get()
@@ -352,8 +368,8 @@ class PairedEndDemux(Demux):
 
             del match_dict, undetermined_dict
 
-        for process in processes:
-            process.join()
+        for p in processes:
+            p.join()
 
     def _rm_empty(self):
         for key, match in self.match_dict.items():
