@@ -25,7 +25,43 @@ class Demux():
     def __init__(self, save_dir, allow_mismatch, threads):
         self.save_dir = save_dir
         self.allow_mismatch = allow_mismatch
-        self.threads = threads if threads else mp.cpu_count()
+        self._get_threads(threads)
+
+    def _get_threads(self, threads):
+        max = mp.cpu_count() - 1
+        if threads is None:
+            logger.info(f"threads wasn't specified. Using maximum available threads {max}.")
+            self.threads = max
+        else:
+            try:
+                threads = int(threads)
+            except ValueError:
+                logger.warning(f"Invalid value for threads. Using maximum available threads {max}.")
+                self.threads = max
+
+            if 0 < threads <= max:
+                self.threads = threads
+            else:
+                logger.warning(f"Threads must be between 1 and {max}. Using maximum available threads {max}.")
+                self.threads = max
+
+    @staticmethod
+    def _get_proper_mismatch(trie):
+        barcode_len = len(next(iter(trie)))
+        for allow_mismatch in range(barcode_len):
+            for index in list(trie):
+                result = trie.all_levenshtein(index, allow_mismatch)
+                if len(set(result)) > 1:
+                    return allow_mismatch - 1
+
+    def _judge_mismatch(self, proper_mismatch):
+        if self.allow_mismatch is None:
+            logger.info(f"allow_mismatch wasn't specified. Setting it to {proper_mismatch}")
+            self.allow_mismatch = proper_mismatch
+        elif self.allow_mismatch > proper_mismatch:
+            logger.warning(f"allow_mismatch is greater than proper value {proper_mismatch}.")
+        else:
+            pass
 
     @staticmethod
     def _approx_match(seq, trie, allow_dist, query_id_list) -> str:
@@ -76,7 +112,7 @@ class SingleEndDemux(Demux):
             index_path,
             raw_path,
             save_dir,
-            allow_mismatch: int = 0,
+            allow_mismatch: int = None,
             threads: int = None,
             read_direction: str = "forward",
             dry: bool = False
@@ -99,6 +135,7 @@ class SingleEndDemux(Demux):
         self._read_barcode(index_path)
         self._init_dict()
         self.trie = Trie(self.barcode)
+        self._get_proper_mismatch()
         self.run(raw_path, dry)
 
     def _read_barcode(self, barcode_path):
@@ -118,7 +155,11 @@ class SingleEndDemux(Demux):
     def _init_dict(self):
         for sample_id in self.sample_id_list:
             self.match_dict[sample_id] = []
-    
+
+    def _get_proper_mismatch(self):
+        proper_mismatch = super()._get_proper_mismatch(self.trie)
+        self._judge_mismatch(proper_mismatch)
+
     def _approx_match(self, seq) -> str:
         return super()._approx_match(seq, self.trie, self.allow_mismatch, self.sample_id_list)
 
@@ -200,7 +241,7 @@ class PairedEndDemux(Demux):
             for_raw_path: str,
             rev_raw_path: str,
             save_dir: str,
-            allow_mismatch: int = 0,
+            allow_mismatch: int = None,
             threads: int = None,
             dry: bool = False
         ):
@@ -230,6 +271,7 @@ class PairedEndDemux(Demux):
         self._init_dict()
         self.for_trie = Trie(self.for_barcode)
         self.rev_trie = Trie(self.rev_barcode)
+        self._get_proper_mismatch()
         self.run(for_raw_path, rev_raw_path, dry)
 
     def _read_barcode(self, barcode_path):
@@ -256,6 +298,12 @@ class PairedEndDemux(Demux):
 
             self.match_num[sample_id] = 0
             self.unmatch_num[sample_id] = 0 
+
+    def _get_proper_mismatch(self):
+        for_proper_mismatch = super()._get_proper_mismatch(self.for_trie)
+        rev_proper_mismatch = super()._get_proper_mismatch(self.rev_trie)
+        proper_mismatch = min(for_proper_mismatch, rev_proper_mismatch)
+        self._judge_mismatch(proper_mismatch)
 
     def _approx_match(self, seq) -> str:
         for trie, direction in [(self.for_trie, "F"), (self.rev_trie, "R")]:
@@ -288,7 +336,7 @@ class PairedEndDemux(Demux):
         queue = mp.Queue()
 
         processes = []
-        for chunk in self.chunks:
+        for chunk in tqdm(self.chunks, desc="Assigning match tasks..."):
             process = mp.Process(target=self._chunk_match_index, args=(chunk, queue, read_direct,))
             process.start()
             processes.append(process)
