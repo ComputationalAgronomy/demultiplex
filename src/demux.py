@@ -1,6 +1,7 @@
 import gzip
 from Bio import SeqIO
-from Bio.SeqIO.QualityIO import FastqGeneralIterator 
+from Bio.SeqIO.QualityIO import FastqGeneralIterator
+from io import BufferedWriter
 import logging
 import multiprocessing as mp
 import os
@@ -113,7 +114,7 @@ class Demux():
 
     @staticmethod
     def _write_fq(records, query_list, save_path):
-        with gzip.open(save_path, 'ab') as out_handle:
+        with BufferedWriter(gzip.open(save_path, 'ab')) as out_handle:
             for seq_id in tqdm(query_list, total=len(query_list), desc=f"Writing {save_path}"):
                 out_handle.write(records.get_raw(seq_id))
 
@@ -182,7 +183,8 @@ class SingleEndDemux(Demux):
     def _chunk_match_index(self, chunk, q):
         match_dict = {}
         undetermined = []
-        for seq_id, seq in chunk:
+        while chunk:
+            seq_id, seq = chunk.pop(0)
             match_sample_id = self._approx_match(seq)
 
             if match_sample_id:
@@ -334,7 +336,8 @@ class PairedEndDemux(Demux):
             "FR": {}, "RF": {}, 
         }
         undetermined_dict = {"F": [], "R": []}
-        for seq_id, seq in chunk:
+        while chunk:
+            seq_id, seq = chunk.pop(0)
             match_sample_id, index_direct = self._approx_match(seq)
 
             if match_sample_id:
