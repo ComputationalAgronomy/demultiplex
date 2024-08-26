@@ -183,8 +183,7 @@ class SingleEndDemux(Demux):
     def _chunk_match_index(self, chunk, q):
         match_dict = {}
         undetermined = []
-        while chunk:
-            seq_id, seq = chunk.pop(0)
+        for seq_id, seq in chunk:
             match_sample_id = self._approx_match(seq)
 
             if match_sample_id:
@@ -336,8 +335,7 @@ class PairedEndDemux(Demux):
             "FR": {}, "RF": {}, 
         }
         undetermined_dict = {"F": [], "R": []}
-        while chunk:
-            seq_id, seq = chunk.pop(0)
+        for seq_id, seq in chunk:
             match_sample_id, index_direct = self._approx_match(seq)
 
             if match_sample_id:
