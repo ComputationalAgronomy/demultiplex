@@ -415,6 +415,11 @@ class PairedEndDemux(Demux):
             super()._write_fq(records, seq_id_list, save_path)
 
     def _report(self):
+        fh = logging.FileHandler(os.path.join(self.save_dir, "report.txt"))
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+
         sample_stats = {}
         total_unmatch_num = 0
         undetermined_num = len(set(self.undetermined_dict["F"] + self.undetermined_dict["R"]))
@@ -430,9 +435,9 @@ class PairedEndDemux(Demux):
 
         logger.info("Sample_ID\tReads\tMatched_Reads\tMatched_Rate")
         for sample_id, (total, matched, match_rate) in sample_stats.items():
-            logger.info(f"{sample_id}\t{total}\t{matched}\t{match_rate:.2f}")
-        logger.info(f"Total_Unmatched\tReads:{total_unmatch_num}\tRate:{total_unmatch_num / total_num:.2f}")
-        logger.info(f"Total_Undetermined\tReads:{undetermined_num}\tRate:{undetermined_num / total_num:.2f}")
+            logger.info(f"{sample_id}\t{total}\t{matched}\t{match_rate*100:.2f}%")
+        logger.info(f"Total_Unmatched\tReads:{total_unmatch_num}\tRate:{(total_unmatch_num / total_num)*100:.2f}%")
+        logger.info(f"Total_Undetermined\tReads:{undetermined_num}\tRate:{(undetermined_num / total_num)*100:.2f}%")
 
     def run(self, for_fq_gz, rev_fq_gz, dry):
         self._match_index(for_fq_gz, "F")
