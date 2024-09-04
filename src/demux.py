@@ -23,7 +23,7 @@ logger.addHandler(sh)
 
 
 class FuzzyMatch():
-    def __init__(self, choices: list[str]):
+    def __init__(self, choices: dict[str, str]):
         self.choices = choices
 
     def best_levenshtein(self, query, allow_dist):
@@ -31,12 +31,6 @@ class FuzzyMatch():
 
     def all_levenshtein(self, query, allow_dist):
         return process.extract(query, self.choices, scorer=Levenshtein.distance, score_cutoff=allow_dist)
-        
-    def aslist(self):
-        return self.choices
-
-    def __iter__(self):
-        return iter(self.aslist())
 
 
 class Demux():
@@ -64,37 +58,17 @@ class Demux():
                 self.threads = max
 
     @staticmethod
-    def _get_proper_mismatch(fm):
-        barcode_len = len(next(iter(fm)))
-        for allow_mismatch in range(barcode_len):
-            for index in list(fm):
-                result = fm.all_levenshtein(index, allow_mismatch)
-                if len(result) > 1:
-                    return allow_mismatch - 1
-
-    def _judge_mismatch(self, proper_mismatch):
-        if self.allow_mismatch is None:
-            logger.info(f"allow_mismatch wasn't specified. Setting it to {proper_mismatch}")
-            self.allow_mismatch = proper_mismatch
-        elif self.allow_mismatch > proper_mismatch:
-            logger.warning(f"allow_mismatch is greater than proper value {proper_mismatch}.")
-        else:
-            pass
-
-    @staticmethod
-    def _approx_match(seq, fm, allow_dist, query_id_list) -> str:
+    def _approx_match(seq, fm, allow_dist) -> str:
         result = fm.best_levenshtein(seq, allow_dist)
         if result:
-            match_sample_id = query_id_list[result[2]]
-            return match_sample_id
+            return result[2]
         return None
 
     def _get_chunks(self, fq_gz):
         records = []
         with gzip.open(fq_gz, 'rt') as in_handle:
             for title, seq, _ in tqdm(FastqGeneralIterator(in_handle), desc="Reading raw data..."):
-                seq_id = title.split(" ")[0]    
-                seq = seq[: self.barcode_len]
+                seq_id = title.split(" ")[0]
                 records.append((seq_id, seq))
 
         chunk_size = len(records) // self.threads + 1
@@ -129,9 +103,10 @@ class SingleEndDemux(Demux):
             index_path,
             raw_path,
             save_dir,
-            allow_mismatch: int = None,
+            allow_mismatch: int = 0,
             threads: int = None,
             read_direction: str = "forward",
+            pr: str = "GTCGGTAAAACTCGTGCCAGC",
             dry: bool = False
         ):
         """
@@ -140,10 +115,11 @@ class SingleEndDemux(Demux):
         :param index_path: path to barcode file, format: <sample_id>\\t<barcode>.
         :param raw_path: path to raw .fastq.gz file.
         :param save_dir: The directory to save demultiplexed fastq.gz file.
+        :param pr: The primer sequence after index. Default is "GTCGGTAAAACTCGTGCCAGC"(MiFish-UF).
         :param allow_mismatch: allow distance for barcode matching. If not specify, automatically use proper number. Default is None
         :param threads: Number of CPU cores to be used for processing. If not specify, use all. Default is None.
         :param read_direction: forward or reverse. Default is "forward"
-        :param dry: dry run
+        :param dry: Dry run. If True, no files will be written; only a demultiplexed report will be output. Default is False.
         """
         super().__init__(save_dir, allow_mismatch, threads)
         self.suffix = "R1" if read_direction in ["forward", "Forward", "F", "R1"] else "R2"
@@ -152,19 +128,19 @@ class SingleEndDemux(Demux):
         self._read_barcode(index_path)
         self._init_dict()
         self.fm = FuzzyMatch(self.barcode)
-        self._get_proper_mismatch()
+        self.pr = pr
         self.run(raw_path, dry)
 
     def _read_barcode(self, barcode_path):
         try:
             self.sample_id_list = []
-            self.barcode = []
+            self.barcode = {}
             with open(barcode_path, 'r') as f:
                 for line in tqdm(f, desc="Reading Index file..."):
                     line = line.strip().split("\t")
                     self.sample_id_list.append(line[0])
-                    self.barcode.append(line[1])
-            self.barcode_len = len(self.barcode[0])
+                    self.barcode[line[0]] = line[1]
+            self.barcode_len = len(line[1])
         except Exception as e:
             logger.error(f"Error reading Index file: {e}. Error line: {line}")
             raise e
@@ -173,17 +149,22 @@ class SingleEndDemux(Demux):
         for sample_id in self.sample_id_list:
             self.match_dict[sample_id] = []
 
-    def _get_proper_mismatch(self):
-        proper_mismatch = super()._get_proper_mismatch(self.fm)
-        self._judge_mismatch(proper_mismatch)
-
     def _approx_match(self, seq) -> str:
-        return super()._approx_match(seq, self.fm, self.allow_mismatch, self.sample_id_list)
+        return super()._approx_match(seq, self.fm, self.allow_mismatch)
 
     def _chunk_match_index(self, chunk, q):
         match_dict = {}
         undetermined = []
         for seq_id, seq in chunk:
+            test_seq = seq[: self.barcode_len + len(self.pr)]
+            all_poss_pr = [test_seq[i:i+len(self.pr)] for i in range(len(test_seq)-len(self.pr)+1)]
+            fm_result = process.extractOne(self.pr, all_poss_pr, scorer=Levenshtein.distance, score_cutoff=int(len(self.pr)*0.15))
+            if fm_result:
+                seq = seq[: fm_result[2]]
+            else:
+                undetermined.append(seq_id)
+                continue
+
             match_sample_id = self._approx_match(seq)
 
             if match_sample_id:
@@ -258,7 +239,9 @@ class PairedEndDemux(Demux):
             for_raw_path: str,
             rev_raw_path: str,
             save_dir: str,
-            allow_mismatch: int = None,
+            pr_5: str = "GTCGGTAAAACTCGTGCCAGC",
+            pr_3: str = "CATAGTGGGGTATCTAATCCCAGTTTG",
+            allow_mismatch: int = 0,
             threads: int = None,
             dry: bool = False
         ):
@@ -269,9 +252,11 @@ class PairedEndDemux(Demux):
         :param for_raw_path: path to raw _R1.fastq.gz file.
         :param rev_raw_path: path to raw _R2.fastq.gz file.
         :param save_dir: The directory to save demultiplexed fastq.gz file.
-        :param allow_mismatch: allow distance for barcode matching
+        :param pr_5: 5' primer after forward index. Default is "GTCGGTAAAACTCGTGCCAGC"(MiFish-UF).
+        :param pr_3: 3' primer after reverse index. Default is "CATAGTGGGGTATCTAATCCCAGTTTG"(MiFish-UR).
+        :param allow_mismatch: allow distance for barcode matching. Default is 0.
         :param threads: Number of CPU cores to be used for processing. If not specify, use all. Default is None.
-        :param dry: dry run
+        :param dry: Dry run. If True, no files will be written; only a demultiplexed report will be output. Default is False.
         """
         super().__init__(save_dir, allow_mismatch, threads)
         self.match_dict = {
@@ -288,21 +273,21 @@ class PairedEndDemux(Demux):
         self._init_dict()
         self.for_fm = FuzzyMatch(self.for_barcode)
         self.rev_fm = FuzzyMatch(self.rev_barcode)
-        self._get_proper_mismatch()
+        self.pr = [pr_5, pr_3]
         self.run(for_raw_path, rev_raw_path, dry)
 
     def _read_barcode(self, barcode_path):
         try:
             self.sample_id_list = []
-            self.for_barcode = []
-            self.rev_barcode = []
+            self.for_barcode = {}
+            self.rev_barcode = {}
             with open(barcode_path, 'r') as f:
                 for line in tqdm(f, desc="Reading Index file"):
                     line = line.strip().split("\t")
                     self.sample_id_list.append(line[0])
-                    self.for_barcode.append(line[1])
-                    self.rev_barcode.append(line[2])
-            self.barcode_len = len(self.for_barcode[0])
+                    self.for_barcode[line[0]] = line[1]
+                    self.rev_barcode[line[0]] = line[2]
+            self.barcode_len = len(line[1])
         except Exception as e:
             logger.error(f"Error reading Index file: {e}. Error line: {line}")
             raise e
@@ -316,15 +301,9 @@ class PairedEndDemux(Demux):
             self.match_num[sample_id] = 0
             self.unmatch_num[sample_id] = 0 
 
-    def _get_proper_mismatch(self):
-        for_proper_mismatch = super()._get_proper_mismatch(self.for_fm)
-        rev_proper_mismatch = super()._get_proper_mismatch(self.rev_fm)
-        proper_mismatch = min(for_proper_mismatch, rev_proper_mismatch)
-        self._judge_mismatch(proper_mismatch)
-
     def _approx_match(self, seq) -> str:
         for fm, direction in [(self.for_fm, "F"), (self.rev_fm, "R")]:
-            match_sample_id = super()._approx_match(seq, fm, self.allow_mismatch, self.sample_id_list)
+            match_sample_id = super()._approx_match(seq, fm, self.allow_mismatch)
             if match_sample_id:
                 return match_sample_id, direction
         return None, None
@@ -335,7 +314,21 @@ class PairedEndDemux(Demux):
             "FR": {}, "RF": {}, 
         }
         undetermined_dict = {"F": [], "R": []}
+
         for seq_id, seq in chunk:
+            poss_pr_start = []
+            for pr in self.pr:
+                test_seq = seq[: self.barcode_len+len(pr)]
+                all_poss_pr = [test_seq[i:i+len(pr)] for i in range(len(test_seq)-len(pr)+1)]
+                fm_result = process.extractOne(pr, all_poss_pr, scorer=Levenshtein.distance, score_cutoff=int(len(pr)*0.15))
+                if fm_result:
+                    poss_pr_start.append(fm_result[2])
+            if poss_pr_start != []:
+                seq = seq[: min(poss_pr_start)]
+            else:
+                undetermined_dict[read_direct].append(seq_id)
+                continue
+
             match_sample_id, index_direct = self._approx_match(seq)
 
             if match_sample_id:
