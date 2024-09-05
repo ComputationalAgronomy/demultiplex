@@ -219,8 +219,11 @@ class SingleEndDemux(Demux):
             logger.info(f"{sample_id}\t{len(seq_id_list)}")
             match_num += len(seq_id_list)
 
-        logger.info(f"Undetermined\t{undetermined_num}")
-        logger.info(f"Determined rate: {match_num / (match_num + undetermined_num) * 100:.2f}%")
+        if match_num+undetermined_num != 0:
+            logger.info(f"Undetermined\t{undetermined_num}")
+            logger.info(f"Determined rate: {match_num / (match_num + undetermined_num) * 100:.2f}%")
+        else:
+            logger.info("No reads matched.")
 
     def run(self, fq_gz, dry):
         self._match_index(fq_gz)
@@ -230,7 +233,6 @@ class SingleEndDemux(Demux):
             self._write_match_fq()
             super()._write_fq(self.records, self.undetermined, f"{self.save_dir}/Undetermined_{self.suffix}.fastq.gz")
         self._report()
-        # super()._del_fq(self.records, fq_gz.replace(".gz", ""))
 
 
 class PairedEndDemux(Demux):
@@ -422,15 +424,22 @@ class PairedEndDemux(Demux):
             match_num = self.match_num[sample_id]
             unmatch_num = self.unmatch_num[sample_id]
             num = match_num + unmatch_num
-            sample_stats[sample_id] = (num, match_num, match_num / num)
-            total_num += num
-            total_unmatch_num += unmatch_num
+            if num != 0:
+                sample_stats[sample_id] = (num, match_num, match_num / num)
+                total_num += num
+                total_unmatch_num += unmatch_num
 
-        logger.info("Sample_ID\tReads\tMatched_Reads\tMatched_Rate")
-        for sample_id, (total, matched, match_rate) in sample_stats.items():
-            logger.info(f"{sample_id}\t{total}\t{matched}\t{match_rate*100:.2f}%")
-        logger.info(f"Total_Unmatched\tReads:{total_unmatch_num}\tRate:{(total_unmatch_num / total_num)*100:.2f}%")
-        logger.info(f"Total_Undetermined\tReads:{undetermined_num}\tRate:{(undetermined_num / total_num)*100:.2f}%")
+        total_match_num = total_num - total_unmatch_num - undetermined_num
+
+        if total_num != 0:
+            logger.info("Sample_ID\tReads\tMatched_Reads\tMatched_Rate")
+            for sample_id, (total, matched, match_rate) in sample_stats.items():
+                logger.info(f"{sample_id}\t{total}\t{matched}\t{match_rate*100:.2f}%")
+            logger.info(f"Total_matched\tReads:{total_match_num}\tRate:{(total_match_num / total_num)*100:.2f}%")
+            logger.info(f"Total_Unmatched\tReads:{total_unmatch_num}\tRate:{(total_unmatch_num / total_num)*100:.2f}%")
+            logger.info(f"Total_Undetermined\tReads:{undetermined_num}\tRate:{(undetermined_num / total_num)*100:.2f}%")
+        else:
+            logger.info("No reads matched any index.")
 
     def run(self, for_fq_gz, rev_fq_gz, dry):
         self._match_index(for_fq_gz, "F")
@@ -460,8 +469,5 @@ class PairedEndDemux(Demux):
 
             super()._write_fq(self.for_records, set(self.undetermined_dict["F"]), f"{self.save_dir}/undetermined_R1.fastq.gz")
             super()._write_fq(self.rev_records, set(self.undetermined_dict["R"]), f"{self.save_dir}/undetermined_R2.fastq.gz")
-
-        # super()._del_fq(self.for_records, for_fq_gz.replace(".gz", ""))
-        # super()._del_fq(self.rev_records, rev_fq_gz.replace(".gz", ""))
 
         self._report()
